@@ -542,7 +542,6 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
     bool mono    = pb.p_mono->get();
     bool port    = pb.p_portamento->get();
     int  portT   = pb.p_portamento_time->get();
-    bool legato  = pb.p_legato->get();
 
     // --- Mono mode: intercept NoteOn / NoteOff ---
     bool is_note_on  = (type == 0x90) && (len >= 3) && (data[2] > 0);
@@ -567,15 +566,12 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
             if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
 
             if (sound >= 0 && sound != (int)pitch) {
-                if (legato) {
-                    // Send new NoteOn first so FM engine reads old pitch as glide source
-                    send_midi3(pl, 0x90 | channel, pitch, vel);
-                    send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
-                } else {
-                    // Cut old note, then start new one (envelope retriggered)
-                    send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
-                    send_midi3(pl, 0x90 | channel, pitch, vel);
-                }
+#if defined(ADLPLUG_OPN2)
+                pl->mono_handoff(channel, (uint8_t)sound, pitch, vel);
+#else
+                send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
+                send_midi3(pl, 0x90 | channel, pitch, vel);
+#endif
             } else if (sound < 0) {
                 send_midi3(pl, 0x90 | channel, pitch, vel);
             }
@@ -593,13 +589,12 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                     MonoNote prev = stack.back();
                     send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                     if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
-                    if (legato) {
-                        send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
-                        send_midi3(pl, 0x80 | channel, pitch, 0);
-                    } else {
-                        send_midi3(pl, 0x80 | channel, pitch, 0);
-                        send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
-                    }
+#if defined(ADLPLUG_OPN2)
+                    pl->mono_handoff(channel, pitch, prev.pitch, prev.velocity);
+#else
+                    send_midi3(pl, 0x80 | channel, pitch, 0);
+                    send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
+#endif
                     sound = prev.pitch;
                 } else {
                     send_midi3(pl, 0x80 | channel, pitch, 0);

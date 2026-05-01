@@ -60,6 +60,11 @@ void Player::play_midi(const uint8_t *msg, unsigned len)
     }
 }
 
+bool Player::mono_handoff(uint8_t channel, uint8_t old_note, uint8_t new_note, uint8_t velocity)
+{
+    return opn2_rt_monoHandoff(player_.get(), channel, old_note, new_note, velocity) != 0;
+}
+
 void Player::generate(float *left, float *right, unsigned nframes, unsigned stride)
 {
     OPNMIDI_AudioFormat format;

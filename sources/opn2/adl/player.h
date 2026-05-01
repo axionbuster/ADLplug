@@ -80,6 +80,7 @@ public:
     void set_soft_pan_enabled(bool sp)
         { opn2_setSoftPanEnabled(player_.get(), sp); }
     void play_midi(const uint8_t *msg, unsigned len);
+    bool mono_handoff(uint8_t channel, uint8_t old_note, uint8_t new_note, uint8_t velocity);
     void generate(float *left, float *right, unsigned nframes, unsigned stride);
 
     void ensure_get_bank_id(const Bank_Ref &bank, Bank_Id &id)

@@ -65,6 +65,11 @@ bool Player::mono_handoff(uint8_t channel, uint8_t old_note, uint8_t new_note, u
     return opn2_rt_monoHandoff(player_.get(), channel, old_note, new_note, velocity) != 0;
 }
 
+bool Player::note_off_fast(uint8_t channel, uint8_t note)
+{
+    return opn2_rt_noteOffFast(player_.get(), channel, note) != 0;
+}
+
 void Player::generate(float *left, float *right, unsigned nframes, unsigned stride)
 {
     OPNMIDI_AudioFormat format;

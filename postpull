@@ -1,0 +1,13 @@
+#!/bin/bash
+
+set -euo pipefail
+set -x
+
+repo_dir="$(cd "$(dirname "$0")" && pwd)"
+build_dir="$repo_dir/build-opn-au-arm64"
+src_bundle="$build_dir/au/OPNplug.component"
+dest_bundle="$HOME/Library/Audio/Plug-Ins/Components/OPNplug.component"
+
+cmake --build "$build_dir" -j 4
+rm -rf "$dest_bundle"
+ditto "$src_bundle" "$dest_bundle"

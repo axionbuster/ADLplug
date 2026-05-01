@@ -41,7 +41,6 @@ AdlplugAudioProcessor::AdlplugAudioProcessor()
 
     for (int i = 0; i < 16; ++i) {
         mono_sounding_[i]   = -1;
-        mono_last_note_[i]  = -1;
     }
 }
 
@@ -105,6 +104,9 @@ void AdlplugAudioProcessor::changeProgramName(int index, const String &new_name)
 //==============================================================================
 void AdlplugAudioProcessor::prepareToPlay(double sample_rate, int block_size)
 {
+    mono_mix_buffer_.setSize(2, block_size, false, false, true);
+    mono_note_on_delay_samples_ = std::max<unsigned>(16u, (unsigned)(sample_rate / 1000.0 + 0.5));
+
     Simple_Fifo *mq_to_ui = new Simple_Fifo(32 * 1024);
     mq_to_ui_.reset(mq_to_ui);
     mq_from_ui_.reset(new Simple_Fifo(32 * 1024));
@@ -149,6 +151,9 @@ void AdlplugAudioProcessor::prepareToPlay(double sample_rate, int block_size)
     for (unsigned i = 0; i < 16; ++i) {
         midi_channel_note_count_[i] = 0;
         midi_channel_note_active_[i].reset();
+        mono_note_stack_[i].clear();
+        mono_sounding_[i] = -1;
+        pending_mono_notes_[i].active = false;
     }
 
     Bank_Manager *bm = new Bank_Manager(
@@ -301,7 +306,8 @@ void AdlplugAudioProcessor::reconfigure_chip_nonrt()
 
 bool AdlplugAudioProcessor::isBusesLayoutSupported(const BusesLayout &layouts) const
 {
-    return layouts.getMainOutputChannelSet() == AudioChannelSet::stereo();
+    const AudioChannelSet output = layouts.getMainOutputChannelSet();
+    return output == AudioChannelSet::mono() || output == AudioChannelSet::stereo();
 }
 
 struct AdlplugAudioProcessor::Message_Handler_Context
@@ -315,6 +321,46 @@ static void send_midi3(Player *pl, uint8_t status, uint8_t d1, uint8_t d2)
 {
     uint8_t msg[3] = {status, d1, d2};
     pl->play_midi(msg, 3);
+}
+
+void AdlplugAudioProcessor::cancel_pending_mono_note_on(unsigned channel)
+{
+    if (channel >= 16)
+        return;
+    pending_mono_notes_[channel].active = false;
+}
+
+void AdlplugAudioProcessor::schedule_pending_mono_note_on(unsigned channel, uint8_t pitch, uint8_t velocity, bool port, uint8_t port_time)
+{
+    if (channel >= 16)
+        return;
+
+    PendingMonoNoteOn &pending = pending_mono_notes_[channel];
+    pending.active = true;
+    pending.pitch = pitch;
+    pending.velocity = velocity;
+    pending.port = port;
+    pending.port_time = port_time;
+    pending.remaining_samples = mono_note_on_delay_samples_;
+}
+
+void AdlplugAudioProcessor::trigger_pending_mono_note_on(unsigned channel)
+{
+    if (channel >= 16)
+        return;
+
+    PendingMonoNoteOn &pending = pending_mono_notes_[channel];
+    if (!pending.active)
+        return;
+
+    Player *pl = player_.get();
+    send_midi3(pl, 0xb0 | channel, 65, pending.port ? 127 : 0);
+    if (pending.port)
+        send_midi3(pl, 0xb0 | channel, 5, pending.port_time);
+    send_midi3(pl, 0x90 | channel, pending.pitch, pending.velocity);
+
+    mono_sounding_[channel] = pending.pitch;
+    pending.active = false;
 }
 
 void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Input_Source &midi)
@@ -344,59 +390,68 @@ void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Inp
     ScopedNoDenormals no_denormals;
     double sample_period = 1.0 / getSampleRate();
 
+    auto clamp_event_frame = [nframes](int time, unsigned minimum_frame) {
+        if (time <= 0)
+            return minimum_frame;
+        return std::min<unsigned>(nframes, std::max<unsigned>(minimum_frame, (unsigned)time));
+    };
+
+    auto render_samples = [pl, left, right](unsigned start, unsigned count) {
+        if (count == 0)
+            return;
+        pl->generate(&left[start], &right[start], count, 1);
+    };
+
     int64_t time_before_generate = Time::getHighResolutionTicks();
-    for (unsigned iframe = 0; iframe != nframes;) {
-        unsigned segment_nframes = std::min(nframes - iframe, midi_interval_max);
-        bool final_segment = iframe + segment_nframes == nframes;
+    for (unsigned iframe = 0; iframe < nframes;) {
+        Midi_Input_Message next_midi = midi.peek_next_event();
+        unsigned next_midi_frame = next_midi ? clamp_event_frame(next_midi.time, iframe) : nframes;
 
-        // handle events from MIDI
-        Midi_Input_Message msg;
-        while ((msg = midi.peek_next_event()) &&
-               (final_segment || msg.time < (int)iframe ||
-                (msg.time - (int)iframe) < (int)(midi_interval_max / 2))) {
-            handle_midi(msg.data, msg.size);
+        unsigned advance = next_midi_frame - iframe;
+        bool has_pending = false;
+        for (unsigned channel = 0; channel < 16; ++channel) {
+            PendingMonoNoteOn &pending = pending_mono_notes_[channel];
+            if (!pending.active)
+                continue;
+            advance = std::min(advance, pending.remaining_samples);
+            has_pending = true;
+        }
+
+        if (!next_midi && !has_pending) {
+            render_samples(iframe, nframes - iframe);
+            break;
+        }
+
+        if (advance > 0) {
+            render_samples(iframe, advance);
+            iframe += advance;
+            for (unsigned channel = 0; channel < 16; ++channel) {
+                PendingMonoNoteOn &pending = pending_mono_notes_[channel];
+                if (pending.active)
+                    pending.remaining_samples -= advance;
+            }
+        }
+
+        bool processed = false;
+        while ((next_midi = midi.peek_next_event()) &&
+               clamp_event_frame(next_midi.time, iframe) == iframe) {
+            handle_midi(next_midi.data, next_midi.size);
             midi.get_next_event();
+            processed = true;
         }
 
-        if (pending_handoff_.active) {
-            // Pre-generate crossfade: fade the old note out, do the handoff at
-            // near-silence, then fade the new note in. This prevents the click
-            // that would occur if mono_handoff's hard mute happened mid-buffer.
-            auto &h = pending_handoff_;
-            constexpr unsigned fade_samples = 32; // ~0.7 ms at 44.1 kHz
-
-            // --- 1. Generate fade-out segment (old note still sounding) ---
-            unsigned fade_out = std::min(fade_samples, segment_nframes);
-            pl->generate(&left[iframe], &right[iframe], fade_out, 1);
-            for (unsigned i = 0; i < fade_out; ++i) {
-                float gain = 1.0f - (float)(i + 1) / (float)fade_out;
-                left[iframe + i]  *= gain;
-                right[iframe + i] *= gain;
+        for (unsigned channel = 0; channel < 16; ++channel) {
+            PendingMonoNoteOn &pending = pending_mono_notes_[channel];
+            if (pending.active && pending.remaining_samples == 0) {
+                trigger_pending_mono_note_on(channel);
+                processed = true;
             }
-
-            // --- 2. Perform the handoff now that audio is at ~zero ---
-#if defined(ADLPLUG_OPN2)
-            send_midi3(pl, 0xb0 | h.channel, 65, h.port ? 127 : 0);
-            if (h.port) send_midi3(pl, 0xb0 | h.channel, 5, h.port_time);
-            pl->mono_handoff(h.channel, h.old_pitch, h.new_pitch, h.new_velocity);
-#endif
-            pending_handoff_.active = false;
-
-            // --- 3. Generate remaining samples (new note) with fade-in ---
-            unsigned remaining = segment_nframes - fade_out;
-            if (remaining > 0) {
-                pl->generate(&left[iframe + fade_out], &right[iframe + fade_out], remaining, 1);
-                unsigned fade_in = std::min(fade_samples, remaining);
-                for (unsigned i = 0; i < fade_in; ++i) {
-                    float gain = (float)(i + 1) / (float)fade_in;
-                    left[iframe + fade_out + i]  *= gain;
-                    right[iframe + fade_out + i] *= gain;
-                }
-            }
-        } else {
-            pl->generate(&left[iframe], &right[iframe], segment_nframes, 1);
         }
-        iframe += segment_nframes;
+
+        if (!processed && advance == 0) {
+            render_samples(iframe, nframes - iframe);
+            break;
+        }
     }
     int64_t time_after_generate = Time::getHighResolutionTicks();
     lock.unlock();
@@ -593,6 +648,7 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
         uint8_t vel   = (len >= 3) ? data[2] : 0;
         auto &stack   = mono_note_stack_[channel];
         int  &sound   = mono_sounding_[channel];
+        PendingMonoNoteOn &pending = pending_mono_notes_[channel];
 
         if (is_note_on) {
             // Remove any existing entry for this pitch (re-press)
@@ -601,67 +657,61 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                 stack.end());
             stack.push_back({pitch, vel});
 
-            // Use mono_last_note_ as old_pitch so that Session Player's
-            // NoteOff-before-NoteOn pattern also gets the crossfade.
-            int &last = mono_last_note_[channel];
-            int old_note = (sound >= 0) ? sound : last;
-
-            if (old_note >= 0 && old_note != (int)pitch) {
+            if (pending.active) {
+                schedule_pending_mono_note_on(channel, pitch, vel, port, (uint8_t)portT);
+            }
+            else if (sound >= 0 && sound != (int)pitch) {
 #if defined(ADLPLUG_OPN2)
-                // Defer the handoff — process() will fade out first, then call
-                // mono_handoff, eliminating the click from the hard mute.
-                pending_handoff_.active       = true;
-                pending_handoff_.channel      = (uint8_t)channel;
-                pending_handoff_.old_pitch    = (uint8_t)old_note;
-                pending_handoff_.new_pitch    = pitch;
-                pending_handoff_.new_velocity = vel;
-                pending_handoff_.port         = port;
-                pending_handoff_.port_time    = (uint8_t)portT;
+                pl->note_off_fast((uint8_t)channel, (uint8_t)sound);
+                sound = -1;
+                schedule_pending_mono_note_on(channel, pitch, vel, port, (uint8_t)portT);
 #else
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
-                send_midi3(pl, 0x80 | channel, (uint8_t)old_note, 0);
+                send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
+                sound = pitch;
 #endif
-            } else if (old_note < 0) {
-                // First note ever on this channel — no transition needed
+            }
+            else if (sound < 0) {
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
+                sound = pitch;
             }
-            // If old_note == pitch (same note re-pressed), do nothing — already sounding
-            sound = pitch;
-            last  = pitch;
-
         } else { // NoteOff (or vel-0 NoteOn)
             stack.erase(std::remove_if(stack.begin(), stack.end(),
                 [pitch](const MonoNote &n){ return n.pitch == pitch; }),
                 stack.end());
 
+            if (pending.active && pending.pitch == pitch) {
+                if (!stack.empty()) {
+                    MonoNote prev = stack.back();
+                    schedule_pending_mono_note_on(channel, prev.pitch, prev.velocity, port, (uint8_t)portT);
+                }
+                else {
+                    cancel_pending_mono_note_on(channel);
+                }
+            }
+
             if (sound == (int)pitch) {
                 if (!stack.empty()) {
-                    // Fall back to the most recently pressed still-held note
                     MonoNote prev = stack.back();
 #if defined(ADLPLUG_OPN2)
-                    pending_handoff_.active       = true;
-                    pending_handoff_.channel      = (uint8_t)channel;
-                    pending_handoff_.old_pitch    = pitch;
-                    pending_handoff_.new_pitch    = prev.pitch;
-                    pending_handoff_.new_velocity = prev.velocity;
-                    pending_handoff_.port         = port;
-                    pending_handoff_.port_time    = (uint8_t)portT;
+                    pl->note_off_fast((uint8_t)channel, pitch);
+                    sound = -1;
+                    schedule_pending_mono_note_on(channel, prev.pitch, prev.velocity, port, (uint8_t)portT);
 #else
                     send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                     if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                     send_midi3(pl, 0x80 | channel, pitch, 0);
                     send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
-#endif
                     sound = prev.pitch;
-                    mono_last_note_[channel] = prev.pitch;
+#endif
                 } else {
                     send_midi3(pl, 0x80 | channel, pitch, 0);
                     sound = -1;
-                    // mono_last_note_ keeps the released pitch for the next NoteOn
+                    cancel_pending_mono_note_on(channel);
                 }
             }
             // Shadowed note released → already removed from stack, no output needed
@@ -711,7 +761,7 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
             if (mono) {
                 mono_note_stack_[channel].clear();
                 mono_sounding_[channel]  = -1;
-                mono_last_note_[channel] = -1;
+                cancel_pending_mono_note_on(channel);
             }
             break;
         }
@@ -937,12 +987,30 @@ void AdlplugAudioProcessor::processBlock(AudioBuffer<float> &buffer,
                                          MidiBuffer &midi_messages)
 {
     unsigned nframes = buffer.getNumSamples();
-    float *outputs[2] = {buffer.getWritePointer(0), buffer.getWritePointer(1)};
-
     MidiBuffer::Iterator midi_iterator(midi_messages);
     Midi_Input_Source midi_source(midi_iterator);
+    const int num_output_channels = buffer.getNumChannels();
 
+    if (num_output_channels >= 2) {
+        float *outputs[2] = {buffer.getWritePointer(0), buffer.getWritePointer(1)};
+        process(outputs, nframes, midi_source);
+        return;
+    }
+
+    if (mono_mix_buffer_.getNumSamples() < (int)nframes)
+        mono_mix_buffer_.setSize(2, (int)nframes, false, false, true);
+
+    float *outputs[2] = {
+        mono_mix_buffer_.getWritePointer(0),
+        mono_mix_buffer_.getWritePointer(1),
+    };
     process(outputs, nframes, midi_source);
+
+    float *mono = buffer.getWritePointer(0);
+    const float *left = mono_mix_buffer_.getReadPointer(0);
+    const float *right = mono_mix_buffer_.getReadPointer(1);
+    for (unsigned i = 0; i < nframes; ++i)
+        mono[i] = 0.5f * (left[i] + right[i]);
 }
 
 void AdlplugAudioProcessor::processBlockBypassed(AudioBuffer<float> &buffer, MidiBuffer &midi_messages)
@@ -975,51 +1043,61 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
     std::lock_guard<std::mutex> lock(player_lock_);
 
     Player *pl = player_.get();
-    if (!pl) {
-        data = last_state_information_;
-        return;
-    }
-
     const Parameter_Block &pb = *parameter_block_;
-    const Bank_Manager &bm = *bank_manager_;
-    const Bank_Manager::Bank_Info *infos = bm.bank_infos();
-
     XmlElement root("ADLMIDI-state");
 
-    for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
-        const Bank_Manager::Bank_Info &info = infos[b_i];
-        if (!info)
-            continue;
-        PropertySet bank_set;
-        char name[33];
-        name[32] = '\0';
-        memcpy(name, info.bank_name, 32);
-        bank_set.setValue("bank", (int)info.id.to_integer());
-        bank_set.setValue("name", name);
-        std::unique_ptr<XmlElement> elt(bank_set.createXml("bank"));
-        root.addChildElement(elt.get());
-        elt.release();
-    }
+    if (pl) {
+        const Bank_Manager &bm = *bank_manager_;
+        const Bank_Manager::Bank_Info *infos = bm.bank_infos();
 
-    for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
-        const Bank_Manager::Bank_Info &info = infos[b_i];
-        if (!info)
-            continue;
-        Instrument ins;
-        for (unsigned p_i = 0; p_i < 128; ++p_i) {
-            if (!info.used.test(p_i))
+        for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
+            const Bank_Manager::Bank_Info &info = infos[b_i];
+            if (!info)
                 continue;
-            pl->ensure_get_instrument(info.bank, p_i, ins);
-            PropertySet ins_set = ins.to_properties();
-            ins_set.setValue("bank", (int)info.id.to_integer());
-            ins_set.setValue("program", (int)p_i);
+            PropertySet bank_set;
             char name[33];
             name[32] = '\0';
-            memcpy(name, info.ins_names + 32 * p_i, 32);
-            ins_set.setValue("name", name);
-            std::unique_ptr<XmlElement> elt(ins_set.createXml("instrument"));
+            memcpy(name, info.bank_name, 32);
+            bank_set.setValue("bank", (int)info.id.to_integer());
+            bank_set.setValue("name", name);
+            std::unique_ptr<XmlElement> elt(bank_set.createXml("bank"));
             root.addChildElement(elt.get());
             elt.release();
+        }
+
+        for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
+            const Bank_Manager::Bank_Info &info = infos[b_i];
+            if (!info)
+                continue;
+            Instrument ins;
+            for (unsigned p_i = 0; p_i < 128; ++p_i) {
+                if (!info.used.test(p_i))
+                    continue;
+                pl->ensure_get_instrument(info.bank, p_i, ins);
+                PropertySet ins_set = ins.to_properties();
+                ins_set.setValue("bank", (int)info.id.to_integer());
+                ins_set.setValue("program", (int)p_i);
+                char name[33];
+                name[32] = '\0';
+                memcpy(name, info.ins_names + 32 * p_i, 32);
+                ins_set.setValue("name", name);
+                std::unique_ptr<XmlElement> elt(ins_set.createXml("instrument"));
+                root.addChildElement(elt.get());
+                elt.release();
+            }
+        }
+    }
+    else if (has_valid_state_information()) {
+        std::unique_ptr<XmlElement> cached_root(
+            getXmlFromBinary(last_state_information_.getData(),
+                             (int)last_state_information_.getSize()));
+        for (XmlElement *elt = cached_root->getFirstChildElement(); elt; elt = elt->getNextElement()) {
+            String tag = elt->getTagName();
+            if (tag == "bank" || tag == "instrument") {
+                std::unique_ptr<XmlElement> copy(new XmlElement(*elt));
+                root.addChildElement(copy.get());
+                copy.release();
+            }
         }
     }
 
@@ -1036,14 +1114,14 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
 
     // chip settings
     {
-        std::unique_ptr<XmlElement> elt(get_player_chip_settings(*pl).to_properties().createXml("chip"));
+        std::unique_ptr<XmlElement> elt(pb.chip_settings().to_properties().createXml("chip"));
         root.addChildElement(elt.get());
         elt.release();
     }
 
     // global parameters
     {
-        std::unique_ptr<XmlElement> elt(get_player_global_parameters(*pl).to_properties().createXml("global"));
+        std::unique_ptr<XmlElement> elt(pb.global_parameters().to_properties().createXml("global"));
         root.addChildElement(elt.get());
         elt.release();
     }
@@ -1054,12 +1132,17 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
         common_set.setValue("bank_title", String(CharPointer_UTF8(bank_title_)));
         common_set.setValue("part", (int)active_part_);
         common_set.setValue("master_volume", (double)*pb.p_mastervol);
+        common_set.setValue("mono", (bool)pb.p_mono->get());
+        common_set.setValue("portamento", (bool)pb.p_portamento->get());
+        common_set.setValue("portamento_time", (int)pb.p_portamento_time->get());
+        common_set.setValue("legato", (bool)pb.p_legato->get());
         std::unique_ptr<XmlElement> elt(common_set.createXml("common"));
         root.addChildElement(elt.get());
         elt.release();
     }
 
     copyXmlToBinary(root, data);
+    last_state_information_ = data;
 }
 
 void AdlplugAudioProcessor::setStateInformation(const void *data, int size)
@@ -1168,6 +1251,10 @@ void AdlplugAudioProcessor::setStateInformation(const void *data, int size)
     for (unsigned p = 0; p < 16; ++p)
         set_instrument_parameters_notifying_host(p);
     *pb.p_mastervol = common_set.getDoubleValue("master_volume", 1.0f);
+    *pb.p_mono = common_set.getBoolValue("mono", false);
+    *pb.p_portamento = common_set.getBoolValue("portamento", false);
+    *pb.p_portamento_time = common_set.getIntValue("portamento_time", 20);
+    *pb.p_legato = common_set.getBoolValue("legato", false);
     parameters_changed_since_state_.store(0);
 }
 

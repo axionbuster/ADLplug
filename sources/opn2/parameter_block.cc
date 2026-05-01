@@ -55,6 +55,11 @@ void Parameter_Block::setup_parameters(AudioProcessorEx &p)
     typedef AudioParameterType Pt;
     typedef NormalisableRange<float> Rf;
 
+    p_mono           = add_parameter<Pt::Bool>(p, 'mono', "mono",            "Mono mode",       false, String());
+    p_portamento     = add_parameter<Pt::Bool>(p, 'mono', "portamento",      "Portamento",      false, String());
+    p_portamento_time= add_parameter<Pt::Int> (p, 'mono', "portamento_time", "Portamento time", 0, 127, 20, String());
+    p_legato         = add_parameter<Pt::Bool>(p, 'mono', "legato",          "Legato",          false, String());
+
     p_mastervol = add_automatable_parameter<Pt::Float>(p, 0, "mastervol", "Master volume", Rf{0.0f, 10.0f}, 1.0f, String());
 
     StringArray emu_choices = get_emulator_defaults().choices;

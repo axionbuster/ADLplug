@@ -182,6 +182,11 @@ private:
     unsigned midi_bank_msb_[16] = {};
     unsigned midi_bank_lsb_[16] = {};
 
+    // Mono mode: per-channel note stack (last-note priority)
+    struct MonoNote { uint8_t pitch; uint8_t velocity; };
+    std::vector<MonoNote> mono_note_stack_[16];
+    int mono_sounding_[16];  // currently sounding pitch, or -1
+
     unsigned active_part_ = 0;
 
     static constexpr unsigned bank_title_size_max = 64;

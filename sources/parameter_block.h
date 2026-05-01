@@ -11,6 +11,12 @@
 #include <memory>
 
 struct Basic_Parameter_Block {
+    // Mono / portamento / legato (chip-agnostic, shared by OPL3 and OPN2)
+    AudioParameterBool *p_mono = nullptr;
+    AudioParameterBool *p_portamento = nullptr;
+    AudioParameterInt  *p_portamento_time = nullptr;
+    AudioParameterBool *p_legato = nullptr;
+
     template <AudioParameterType Ty, class... Arg>
     TypedAudioParameter<Ty> *add_automatable_parameter(AudioProcessorEx &p, int tag, Arg &&... args);
 

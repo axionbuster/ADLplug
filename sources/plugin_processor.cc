@@ -17,6 +17,7 @@
 #include "plugin_editor.h"
 #include "worker.h"
 #include "resources.h"
+#include <algorithm>
 #include <cassert>
 
 #if defined(ADLPLUG_OPL3)
@@ -37,6 +38,9 @@ AdlplugAudioProcessor::AdlplugAudioProcessor()
 
     for (AudioProcessorParameter *p : getParameters())
         p->addListener(this);
+
+    for (int i = 0; i < 16; ++i)
+        mono_sounding_[i] = -1;
 }
 
 AdlplugAudioProcessor::~AdlplugAudioProcessor()
@@ -517,18 +521,105 @@ void AdlplugAudioProcessor::process_notifications()
     }
 }
 
+// Send a 3-byte MIDI message directly to the player (used by mono logic).
+static void send_midi3(Player *pl, uint8_t status, uint8_t d1, uint8_t d2)
+{
+    uint8_t msg[3] = {status, d1, d2};
+    pl->play_midi(msg, 3);
+}
+
 bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
 {
     Player *pl = player_.get();
-    pl->play_midi(data, len);
 
-    unsigned status = (len > 0) ? data[0] : 0;
+    if (len == 0) { pl->play_midi(data, len); return true; }
+
+    unsigned status  = data[0];
     unsigned channel = status & 0x0f;
+    unsigned type    = status & 0xf0;
 
+    Parameter_Block &pb = *parameter_block_;
+    bool mono    = pb.p_mono->get();
+    bool port    = pb.p_portamento->get();
+    int  portT   = pb.p_portamento_time->get();
+    bool legato  = pb.p_legato->get();
+
+    // --- Mono mode: intercept NoteOn / NoteOff ---
+    bool is_note_on  = (type == 0x90) && (len >= 3) && (data[2] > 0);
+    bool is_note_off = (type == 0x80) && (len >= 3);
+    bool is_vel0_off = (type == 0x90) && (len >= 3) && (data[2] == 0);
+
+    if (mono && (is_note_on || is_note_off || is_vel0_off)) {
+        uint8_t pitch = data[1];
+        uint8_t vel   = (len >= 3) ? data[2] : 0;
+        auto &stack   = mono_note_stack_[channel];
+        int  &sound   = mono_sounding_[channel];
+
+        if (is_note_on) {
+            // Remove any existing entry for this pitch (re-press)
+            stack.erase(std::remove_if(stack.begin(), stack.end(),
+                [pitch](const MonoNote &n){ return n.pitch == pitch; }),
+                stack.end());
+            stack.push_back({pitch, vel});
+
+            // Arm portamento CCs before the note transition
+            send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
+            if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
+
+            if (sound >= 0 && sound != (int)pitch) {
+                if (legato) {
+                    // Send new NoteOn first so FM engine reads old pitch as glide source
+                    send_midi3(pl, 0x90 | channel, pitch, vel);
+                    send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
+                } else {
+                    // Cut old note, then start new one (envelope retriggered)
+                    send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
+                    send_midi3(pl, 0x90 | channel, pitch, vel);
+                }
+            } else if (sound < 0) {
+                send_midi3(pl, 0x90 | channel, pitch, vel);
+            }
+            // If sound == pitch (same note re-pressed), do nothing — already sounding
+            sound = pitch;
+
+        } else { // NoteOff (or vel-0 NoteOn)
+            stack.erase(std::remove_if(stack.begin(), stack.end(),
+                [pitch](const MonoNote &n){ return n.pitch == pitch; }),
+                stack.end());
+
+            if (sound == (int)pitch) {
+                if (!stack.empty()) {
+                    // Fall back to the most recently pressed still-held note
+                    MonoNote prev = stack.back();
+                    send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
+                    if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
+                    if (legato) {
+                        send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
+                        send_midi3(pl, 0x80 | channel, pitch, 0);
+                    } else {
+                        send_midi3(pl, 0x80 | channel, pitch, 0);
+                        send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
+                    }
+                    sound = prev.pitch;
+                } else {
+                    send_midi3(pl, 0x80 | channel, pitch, 0);
+                    sound = -1;
+                }
+            }
+            // Shadowed note released → already removed from stack, no output needed
+        }
+
+        // Still fall through to UI note-tracking below
+    } else {
+        // Polyphonic passthrough (or non-note events)
+        pl->play_midi(data, len);
+    }
+
+    // --- UI note tracking (unchanged from original) ---
     if ((status & 0xf0) != 0xf0 && !midi_channel_mask_[channel])
         return true;
 
-    switch (status & 0xf0) {
+    switch (type) {
     case 0x90:
         if (len < 3) break;
         if (data[2] > 0) {
@@ -538,6 +629,7 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
             }
             break;
         }
+        [[fallthrough]];
     case 0x80:
         if (len < 3) break;
         if (midi_channel_note_active_[channel][data[1]]) {
@@ -557,6 +649,11 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
         case 120: case 123:
             midi_channel_note_count_[channel] = 0;
             midi_channel_note_active_[channel].reset();
+            // Also clear mono state on All Notes Off
+            if (mono) {
+                mono_note_stack_[channel].clear();
+                mono_sounding_[channel] = -1;
+            }
             break;
         }
         break;

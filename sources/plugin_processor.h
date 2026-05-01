@@ -185,7 +185,8 @@ private:
     // Mono mode: per-channel note stack (last-note priority)
     struct MonoNote { uint8_t pitch; uint8_t velocity; };
     std::vector<MonoNote> mono_note_stack_[16];
-    int mono_sounding_[16];  // currently sounding pitch, or -1
+    int mono_sounding_[16];   // currently held pitch, or -1
+    int mono_last_note_[16];  // last pitch sent to chip (persists after NoteOff)
 
     // Deferred handoff: set by handle_midi(), consumed by process()
     // Allows a pre-generate fade-out before the hard mute, eliminating clicks.

@@ -39,8 +39,10 @@ AdlplugAudioProcessor::AdlplugAudioProcessor()
     for (AudioProcessorParameter *p : getParameters())
         p->addListener(this);
 
-    for (int i = 0; i < 16; ++i)
-        mono_sounding_[i] = -1;
+    for (int i = 0; i < 16; ++i) {
+        mono_sounding_[i]   = -1;
+        mono_last_note_[i]  = -1;
+    }
 }
 
 AdlplugAudioProcessor::~AdlplugAudioProcessor()
@@ -599,13 +601,18 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                 stack.end());
             stack.push_back({pitch, vel});
 
-            if (sound >= 0 && sound != (int)pitch) {
+            // Use mono_last_note_ as old_pitch so that Session Player's
+            // NoteOff-before-NoteOn pattern also gets the crossfade.
+            int &last = mono_last_note_[channel];
+            int old_note = (sound >= 0) ? sound : last;
+
+            if (old_note >= 0 && old_note != (int)pitch) {
 #if defined(ADLPLUG_OPN2)
                 // Defer the handoff — process() will fade out first, then call
                 // mono_handoff, eliminating the click from the hard mute.
                 pending_handoff_.active       = true;
                 pending_handoff_.channel      = (uint8_t)channel;
-                pending_handoff_.old_pitch    = (uint8_t)sound;
+                pending_handoff_.old_pitch    = (uint8_t)old_note;
                 pending_handoff_.new_pitch    = pitch;
                 pending_handoff_.new_velocity = vel;
                 pending_handoff_.port         = port;
@@ -613,17 +620,18 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
 #else
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
-                send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
+                send_midi3(pl, 0x80 | channel, (uint8_t)old_note, 0);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
 #endif
-            } else if (sound < 0) {
-                // First note — no transition needed
+            } else if (old_note < 0) {
+                // First note ever on this channel — no transition needed
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
             }
-            // If sound == pitch (same note re-pressed), do nothing — already sounding
+            // If old_note == pitch (same note re-pressed), do nothing — already sounding
             sound = pitch;
+            last  = pitch;
 
         } else { // NoteOff (or vel-0 NoteOn)
             stack.erase(std::remove_if(stack.begin(), stack.end(),
@@ -649,9 +657,11 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                     send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
 #endif
                     sound = prev.pitch;
+                    mono_last_note_[channel] = prev.pitch;
                 } else {
                     send_midi3(pl, 0x80 | channel, pitch, 0);
                     sound = -1;
+                    // mono_last_note_ keeps the released pitch for the next NoteOn
                 }
             }
             // Shadowed note released → already removed from stack, no output needed
@@ -700,7 +710,8 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
             // Also clear mono state on All Notes Off
             if (mono) {
                 mono_note_stack_[channel].clear();
-                mono_sounding_[channel] = -1;
+                mono_sounding_[channel]  = -1;
+                mono_last_note_[channel] = -1;
             }
             break;
         }

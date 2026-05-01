@@ -992,51 +992,61 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
     std::lock_guard<std::mutex> lock(player_lock_);
 
     Player *pl = player_.get();
-    if (!pl) {
-        data = last_state_information_;
-        return;
-    }
-
     const Parameter_Block &pb = *parameter_block_;
-    const Bank_Manager &bm = *bank_manager_;
-    const Bank_Manager::Bank_Info *infos = bm.bank_infos();
-
     XmlElement root("ADLMIDI-state");
 
-    for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
-        const Bank_Manager::Bank_Info &info = infos[b_i];
-        if (!info)
-            continue;
-        PropertySet bank_set;
-        char name[33];
-        name[32] = '\0';
-        memcpy(name, info.bank_name, 32);
-        bank_set.setValue("bank", (int)info.id.to_integer());
-        bank_set.setValue("name", name);
-        std::unique_ptr<XmlElement> elt(bank_set.createXml("bank"));
-        root.addChildElement(elt.get());
-        elt.release();
-    }
+    if (pl) {
+        const Bank_Manager &bm = *bank_manager_;
+        const Bank_Manager::Bank_Info *infos = bm.bank_infos();
 
-    for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
-        const Bank_Manager::Bank_Info &info = infos[b_i];
-        if (!info)
-            continue;
-        Instrument ins;
-        for (unsigned p_i = 0; p_i < 128; ++p_i) {
-            if (!info.used.test(p_i))
+        for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
+            const Bank_Manager::Bank_Info &info = infos[b_i];
+            if (!info)
                 continue;
-            pl->ensure_get_instrument(info.bank, p_i, ins);
-            PropertySet ins_set = ins.to_properties();
-            ins_set.setValue("bank", (int)info.id.to_integer());
-            ins_set.setValue("program", (int)p_i);
+            PropertySet bank_set;
             char name[33];
             name[32] = '\0';
-            memcpy(name, info.ins_names + 32 * p_i, 32);
-            ins_set.setValue("name", name);
-            std::unique_ptr<XmlElement> elt(ins_set.createXml("instrument"));
+            memcpy(name, info.bank_name, 32);
+            bank_set.setValue("bank", (int)info.id.to_integer());
+            bank_set.setValue("name", name);
+            std::unique_ptr<XmlElement> elt(bank_set.createXml("bank"));
             root.addChildElement(elt.get());
             elt.release();
+        }
+
+        for (unsigned b_i = 0; b_i < bank_reserve_size; ++b_i) {
+            const Bank_Manager::Bank_Info &info = infos[b_i];
+            if (!info)
+                continue;
+            Instrument ins;
+            for (unsigned p_i = 0; p_i < 128; ++p_i) {
+                if (!info.used.test(p_i))
+                    continue;
+                pl->ensure_get_instrument(info.bank, p_i, ins);
+                PropertySet ins_set = ins.to_properties();
+                ins_set.setValue("bank", (int)info.id.to_integer());
+                ins_set.setValue("program", (int)p_i);
+                char name[33];
+                name[32] = '\0';
+                memcpy(name, info.ins_names + 32 * p_i, 32);
+                ins_set.setValue("name", name);
+                std::unique_ptr<XmlElement> elt(ins_set.createXml("instrument"));
+                root.addChildElement(elt.get());
+                elt.release();
+            }
+        }
+    }
+    else if (has_valid_state_information()) {
+        std::unique_ptr<XmlElement> cached_root(
+            getXmlFromBinary(last_state_information_.getData(),
+                             (int)last_state_information_.getSize()));
+        for (XmlElement *elt = cached_root->getFirstChildElement(); elt; elt = elt->getNextElement()) {
+            String tag = elt->getTagName();
+            if (tag == "bank" || tag == "instrument") {
+                std::unique_ptr<XmlElement> copy(elt->createCopy());
+                root.addChildElement(copy.get());
+                copy.release();
+            }
         }
     }
 
@@ -1053,14 +1063,14 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
 
     // chip settings
     {
-        std::unique_ptr<XmlElement> elt(get_player_chip_settings(*pl).to_properties().createXml("chip"));
+        std::unique_ptr<XmlElement> elt(pb.chip_settings().to_properties().createXml("chip"));
         root.addChildElement(elt.get());
         elt.release();
     }
 
     // global parameters
     {
-        std::unique_ptr<XmlElement> elt(get_player_global_parameters(*pl).to_properties().createXml("global"));
+        std::unique_ptr<XmlElement> elt(pb.global_parameters().to_properties().createXml("global"));
         root.addChildElement(elt.get());
         elt.release();
     }
@@ -1081,6 +1091,7 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
     }
 
     copyXmlToBinary(root, data);
+    last_state_information_ = data;
 }
 
 void AdlplugAudioProcessor::setStateInformation(const void *data, int size)

@@ -1071,6 +1071,10 @@ void AdlplugAudioProcessor::getStateInformation(MemoryBlock &data)
         common_set.setValue("bank_title", String(CharPointer_UTF8(bank_title_)));
         common_set.setValue("part", (int)active_part_);
         common_set.setValue("master_volume", (double)*pb.p_mastervol);
+        common_set.setValue("mono", (bool)pb.p_mono->get());
+        common_set.setValue("portamento", (bool)pb.p_portamento->get());
+        common_set.setValue("portamento_time", (int)pb.p_portamento_time->get());
+        common_set.setValue("legato", (bool)pb.p_legato->get());
         std::unique_ptr<XmlElement> elt(common_set.createXml("common"));
         root.addChildElement(elt.get());
         elt.release();
@@ -1185,6 +1189,10 @@ void AdlplugAudioProcessor::setStateInformation(const void *data, int size)
     for (unsigned p = 0; p < 16; ++p)
         set_instrument_parameters_notifying_host(p);
     *pb.p_mastervol = common_set.getDoubleValue("master_volume", 1.0f);
+    *pb.p_mono = common_set.getBoolValue("mono", false);
+    *pb.p_portamento = common_set.getBoolValue("portamento", false);
+    *pb.p_portamento_time = common_set.getIntValue("portamento_time", 20);
+    *pb.p_legato = common_set.getBoolValue("legato", false);
     parameters_changed_since_state_.store(0);
 }
 

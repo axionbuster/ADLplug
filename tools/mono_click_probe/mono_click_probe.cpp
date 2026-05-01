@@ -75,7 +75,7 @@ void send_midi3(Player &player, uint8_t status, uint8_t d1, uint8_t d2)
     }
 }
 
-bool set_mame_emulator(Player &player)
+bool set_emulator(Player &player, const std::string &needle)
 {
     for (int i = 0; i < 32; ++i) {
         if (opn2_switchEmulator(player.device, i) < 0)
@@ -86,7 +86,7 @@ bool set_mame_emulator(Player &player)
         std::string lower(name);
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char c) { return (char)std::tolower(c); });
-        if (lower.rfind("mame", 0) == 0)
+        if (lower.find(needle) != std::string::npos)
             return true;
     }
     return false;
@@ -158,8 +158,8 @@ void write_wav(const char *path, const std::vector<float> &left, const std::vect
 
 int main(int argc, char **argv)
 {
-    if (argc != 6) {
-        std::cerr << "usage: mono_click_probe <bank.wopn> <events.tsv> <out.wav> <seconds> <mono|poly>\n";
+    if (argc != 6 && argc != 7) {
+        std::cerr << "usage: mono_click_probe <bank.wopn> <events.tsv> <out.wav> <seconds> <mono|poly> [emulator-substring]\n";
         return 2;
     }
 
@@ -168,6 +168,7 @@ int main(int argc, char **argv)
     const char *wav_path = argv[3];
     const double duration_seconds = std::atof(argv[4]);
     const std::string mode = argv[5];
+    const std::string emulator = argc == 7 ? argv[6] : "mame";
 
     constexpr unsigned sample_rate = 44100;
     constexpr unsigned channel = 1;
@@ -182,8 +183,8 @@ int main(int argc, char **argv)
         std::cerr << "failed to init OPNMIDI\n";
         return 1;
     }
-    if (!set_mame_emulator(player))
-        std::cerr << "warning: failed to select MAME emulator, using current default\n";
+    if (!set_emulator(player, emulator))
+        std::cerr << "warning: failed to select emulator containing '" << emulator << "', using current default\n";
     opn2_setNumChips(player.device, 2);
     opn2_setSoftPanEnabled(player.device, 1);
     opn2_setLoopEnabled(player.device, 0);
@@ -191,6 +192,7 @@ int main(int argc, char **argv)
         std::cerr << "bank open failed: " << opn2_errorInfo(player.device) << "\n";
         return 1;
     }
+    std::cout << "emulator\t" << opn2_chipEmulatorName(player.device) << "\n";
 
     opn2_rt_patchChange(player.device, channel, program);
 

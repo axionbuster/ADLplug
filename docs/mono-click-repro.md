@@ -10,6 +10,7 @@
   - source material: the first few seconds of `temp-midi-bass.mid`
 - A stripped offline probe was used to replay only the first **3.5s** worth of channel events from that MIDI file and score sample-to-sample discontinuity spikes around note edges.
 - For that first 3.5s slice, the largest spikes were identical in **mono** and **poly** playback, so this repro slice is **not currently mono-exclusive**.
+- The same slice is also **emulator-sensitive**: MAME-family backends show the largest discontinuity spikes, while Nuked produces much smaller absolute peaks on the same material.
 
 ## Measured spike summary
 
@@ -25,6 +26,15 @@ Observed worst spikes on the current build:
 | 1.000000 | 0.00183111 | 15.00x | `note_on ch=1 note=50 vel=89` |
 | 1.640270 | 0.00137333 | 11.25x | `note_off ch=1 note=50 vel=64` |
 | 0.856939 | 0.000946074 | 7.75x | `note_on ch=1 note=50 vel=89` |
+
+Observed backend difference on the same mono render:
+
+| Emulator | Worst peak delta | Notes |
+| --- | ---: | --- |
+| `MAME YM2612` | 0.00241096 | current historical default, worst measured spikes |
+| `GENS 2.10 OPN2` | 0.00234993 | similarly clicky on this excerpt |
+| `Neko Project II Kai OPNA` | 0.00225837 | still clicky, slightly lower |
+| `Nuked OPN2` | 0.00122074 | materially lower absolute peak on this excerpt |
 
 ## What is checked in
 
@@ -43,7 +53,8 @@ The probe:
 2. Selects program 56 on channel 1.
 3. Replays the extracted event slice for 3.5 seconds.
 4. Can run in `mono` or `poly` mode.
-5. Writes a WAV file and prints the largest discontinuity spikes.
+5. Can optionally select an emulator by substring (default: `mame`).
+6. Writes a WAV file and prints the largest discontinuity spikes.
 
 The `mono` mode in this probe mirrors the current plugin-side mono scheduling model closely enough to compare mono-vs-poly behavior on the same event sequence.
 
@@ -81,8 +92,20 @@ build-opn-au-arm64/mono_click_probe \
   poly
 ```
 
+Run against Nuked instead of MAME:
+
+```bash
+build-opn-au-arm64/mono_click_probe \
+  thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
+  tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
+  build-opn-au-arm64/mono_click_probe_nuked.wav \
+  3.5 \
+  mono \
+  nuked
+```
+
 ## Interpretation
 
-If mono and poly produce the same spike profile on this excerpt, the immediate failure is likely a more general note-edge problem for this patch/range, not just the mono handoff path.
+If mono and poly produce the same spike profile on this excerpt, the immediate failure is likely a more general note-edge problem for this patch/range, not just the mono handoff path. If emulator choice materially changes peak size, backend behavior is part of the bug surface and not just the note scheduler.
 
 Future work should keep this probe around as a regression harness and add a second event fixture with explicit overlapping mono-note transitions so mono-only failures can be isolated from generic patch clicks.

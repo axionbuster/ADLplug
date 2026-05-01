@@ -38,16 +38,20 @@ Emulator_Defaults &get_emulator_defaults()
         defaults->choices.add(choice);
 
     //
-    unsigned default_index = ~0u;
-    for (unsigned i = 0; i < count && default_index == ~0u; ++i) {
+    unsigned nuked_index = ~0u;
+    unsigned mame_index = ~0u;
+    for (unsigned i = 0; i < count; ++i) {
         std::string name = choices[i];
         std::transform(name.begin(), name.end(), name.begin(),
                        [](unsigned char c) -> unsigned char
                            { return (c >= 'A' && c <= 'Z') ? (c - 'A' + 'a') : c; });
-        if (name.size() >= 4 && !memcmp(name.data(), "mame", 4))
-            default_index = i;
+        if (nuked_index == ~0u && name.size() >= 5 && !memcmp(name.data(), "nuked", 5))
+            nuked_index = i;
+        if (mame_index == ~0u && name.size() >= 4 && !memcmp(name.data(), "mame", 4))
+            mame_index = i;
     }
-    defaults->default_index = (default_index != ~0u) ? default_index : 0;
+    defaults->default_index = (nuked_index != ~0u) ? nuked_index :
+        (mame_index != ~0u) ? mame_index : 0;
 
     //
     defaults->images.reset(new Image[count]);
@@ -84,7 +88,9 @@ PropertySet Chip_Settings::to_properties() const
 Chip_Settings Chip_Settings::from_properties(const PropertySet &set)
 {
     Chip_Settings cs;
-    cs.emulator = set.getIntValue("emulator");
+    cs.emulator = set.containsKey("emulator")
+        ? (unsigned)set.getIntValue("emulator")
+        : get_emulator_defaults().default_index;
     cs.chip_count = set.getIntValue("chip_count");
     cs.chip_type = set.getIntValue("chip_type");
     return cs;

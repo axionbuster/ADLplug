@@ -142,3 +142,7 @@ build-mono-click-probe/mono_click_probe \
 If mono and poly produce the same spike profile on this excerpt, the immediate failure is likely a more general note-edge problem for this patch/range, not just the mono handoff path. If emulator choice materially changes peak size, backend behavior is part of the bug surface and not just the note scheduler.
 
 Future work should keep this probe around as a regression harness and add a second event fixture with explicit overlapping mono-note transitions so mono-only failures can be isolated from generic patch clicks.
+
+## Next-step planning note (2026-05-01)
+
+For a focused OPN/AU remediation strategy (quick patch + fundamental refactor path), see `docs/mono-click-remediation-plan-2026-05-01.md`.

@@ -68,6 +68,7 @@ private:
     void process_messages(bool under_lock);
     void process_parameter_changes();
     void process_notifications();
+    bool has_valid_state_information() const;
 
 public:
     struct Message_Handler_Context;

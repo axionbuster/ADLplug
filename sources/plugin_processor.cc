@@ -169,7 +169,7 @@ void AdlplugAudioProcessor::prepareToPlay(double sample_rate, int block_size)
     ready_.store(1);
 
     const bool use_saved_state =
-        last_state_information_.getSize() != 0 &&
+        has_valid_state_information() &&
         !parameters_changed_since_state_.load();
 
     if (use_saved_state) {
@@ -195,6 +195,7 @@ void AdlplugAudioProcessor::releaseResources()
     }
 
     getStateInformation(last_state_information_);
+    parameters_changed_since_state_.store(0);
 
     ready_.store(0);
 
@@ -207,6 +208,18 @@ void AdlplugAudioProcessor::releaseResources()
     mq_to_ui_.reset();
     mq_from_worker_.reset();
     mq_to_worker_.reset();
+}
+
+bool AdlplugAudioProcessor::has_valid_state_information() const
+{
+    if (last_state_information_.getSize() == 0)
+        return false;
+
+    std::unique_ptr<XmlElement> root(
+        getXmlFromBinary(last_state_information_.getData(),
+                         (int)last_state_information_.getSize()));
+
+    return root && root->getTagName() == "ADLMIDI-state";
 }
 
 std::unique_lock<std::mutex> AdlplugAudioProcessor::acquire_player_nonrt()

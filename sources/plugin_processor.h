@@ -199,7 +199,9 @@ private:
         bool     port        = false;
         uint8_t  port_time   = 0;
     };
-    PendingHandoff pending_handoff_;
+    static constexpr int kMaxPendingHandoffs = 4;
+    PendingHandoff pending_handoffs_[kMaxPendingHandoffs];
+    int pending_handoff_count_ = 0;
 
     unsigned active_part_ = 0;
 

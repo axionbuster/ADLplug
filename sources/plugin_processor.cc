@@ -358,11 +358,11 @@ void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Inp
             midi.get_next_event();
         }
 
-        if (pending_handoff_.active) {
+        if (pending_handoff_count_ > 0) {
             // Pre-generate crossfade: fade the old note out, do the handoff at
             // near-silence, then fade the new note in. This prevents the click
             // that would occur if mono_handoff's hard mute happened mid-buffer.
-            auto &h = pending_handoff_;
+            auto &h = pending_handoffs_[0];
             constexpr unsigned fade_samples = 32; // ~0.7 ms at 44.1 kHz
 
             // --- 1. Generate fade-out segment (old note still sounding) ---
@@ -380,7 +380,10 @@ void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Inp
             if (h.port) send_midi3(pl, 0xb0 | h.channel, 5, h.port_time);
             pl->mono_handoff(h.channel, h.old_pitch, h.new_pitch, h.new_velocity);
 #endif
-            pending_handoff_.active = false;
+            // Remove consumed entry from the front of the queue.
+            for (int i = 1; i < pending_handoff_count_; ++i)
+                pending_handoffs_[i - 1] = pending_handoffs_[i];
+            --pending_handoff_count_;
 
             // --- 3. Generate remaining samples (new note) with fade-in ---
             unsigned remaining = segment_nframes - fade_out;
@@ -610,13 +613,16 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
 #if defined(ADLPLUG_OPN2)
                 // Defer the handoff — process() will fade out first, then call
                 // mono_handoff, eliminating the click from the hard mute.
-                pending_handoff_.active       = true;
-                pending_handoff_.channel      = (uint8_t)channel;
-                pending_handoff_.old_pitch    = (uint8_t)old_note;
-                pending_handoff_.new_pitch    = pitch;
-                pending_handoff_.new_velocity = vel;
-                pending_handoff_.port         = port;
-                pending_handoff_.port_time    = (uint8_t)portT;
+                if (pending_handoff_count_ < kMaxPendingHandoffs) {
+                    PendingHandoff &h        = pending_handoffs_[pending_handoff_count_++];
+                    h.active                 = true;
+                    h.channel                = (uint8_t)channel;
+                    h.old_pitch              = (uint8_t)old_note;
+                    h.new_pitch              = pitch;
+                    h.new_velocity           = vel;
+                    h.port                   = port;
+                    h.port_time              = (uint8_t)portT;
+                }
 #else
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
@@ -628,8 +634,16 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                 send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                 if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
+            } else {
+                // old_note == pitch: same note pressed again
+                if (sound < 0) {
+                    // Re-pressed after its NoteOff — must retrigger (no crossfade needed).
+                    send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
+                    if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
+                    send_midi3(pl, 0x90 | channel, pitch, vel);
+                }
+                // If sound >= 0, note is truly still held — already sounding, do nothing.
             }
-            // If old_note == pitch (same note re-pressed), do nothing — already sounding
             sound = pitch;
             last  = pitch;
 
@@ -643,13 +657,16 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                     // Fall back to the most recently pressed still-held note
                     MonoNote prev = stack.back();
 #if defined(ADLPLUG_OPN2)
-                    pending_handoff_.active       = true;
-                    pending_handoff_.channel      = (uint8_t)channel;
-                    pending_handoff_.old_pitch    = pitch;
-                    pending_handoff_.new_pitch    = prev.pitch;
-                    pending_handoff_.new_velocity = prev.velocity;
-                    pending_handoff_.port         = port;
-                    pending_handoff_.port_time    = (uint8_t)portT;
+                    if (pending_handoff_count_ < kMaxPendingHandoffs) {
+                        PendingHandoff &h        = pending_handoffs_[pending_handoff_count_++];
+                        h.active                 = true;
+                        h.channel                = (uint8_t)channel;
+                        h.old_pitch              = pitch;
+                        h.new_pitch              = prev.pitch;
+                        h.new_velocity           = prev.velocity;
+                        h.port                   = port;
+                        h.port_time              = (uint8_t)portT;
+                    }
 #else
                     send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                     if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);

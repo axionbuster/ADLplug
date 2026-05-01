@@ -69,6 +69,9 @@ private:
     void process_parameter_changes();
     void process_notifications();
     bool has_valid_state_information() const;
+    void cancel_pending_mono_note_on(unsigned channel);
+    void schedule_pending_mono_note_on(unsigned channel, uint8_t pitch, uint8_t velocity, bool port, uint8_t port_time);
+    void trigger_pending_mono_note_on(unsigned channel);
 
 public:
     struct Message_Handler_Context;
@@ -160,6 +163,7 @@ private:
     std::unique_ptr<Simple_Fifo> mq_from_worker_;
     std::unique_ptr<Simple_Fifo> mq_to_worker_;
 
+    AudioBuffer<float> mono_mix_buffer_;
     Dc_Filter dc_filter_[2];
     Vu_Monitor vu_monitor_[2];
     double lv_current_[2] {};
@@ -186,22 +190,16 @@ private:
     struct MonoNote { uint8_t pitch; uint8_t velocity; };
     std::vector<MonoNote> mono_note_stack_[16];
     int mono_sounding_[16];   // currently held pitch, or -1
-    int mono_last_note_[16];  // last pitch sent to chip (persists after NoteOff)
-
-    // Deferred handoff: set by handle_midi(), consumed by process()
-    // Allows a pre-generate fade-out before the hard mute, eliminating clicks.
-    struct PendingHandoff {
-        bool     active      = false;
-        uint8_t  channel     = 0;
-        uint8_t  old_pitch   = 0;
-        uint8_t  new_pitch   = 0;
-        uint8_t  new_velocity = 0;
+    struct PendingMonoNoteOn {
+        bool     active = false;
+        uint8_t  pitch = 0;
+        uint8_t  velocity = 0;
         bool     port        = false;
         uint8_t  port_time   = 0;
+        unsigned remaining_samples = 0;
     };
-    static constexpr int kMaxPendingHandoffs = 4;
-    PendingHandoff pending_handoffs_[kMaxPendingHandoffs];
-    int pending_handoff_count_ = 0;
+    PendingMonoNoteOn pending_mono_notes_[16];
+    unsigned mono_note_on_delay_samples_ = 0;
 
     unsigned active_part_ = 0;
 

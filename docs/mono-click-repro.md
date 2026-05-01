@@ -41,6 +41,7 @@ Observed backend difference on the same mono render:
 To avoid checking in the full melody, only the extracted repro event slice is stored:
 
 - harness source: `tools/mono_click_probe/mono_click_probe.cpp`
+- harness CMake entrypoint: `tools/mono_click_probe/CMakeLists.txt`
 - extracted event slice: `tools/mono_click_probe/temp_midi_bass_excerpt.tsv`
 
 The full `temp-midi-bass.mid` file is intentionally **not** checked in.
@@ -60,7 +61,9 @@ The `mono` mode in this probe mirrors the current plugin-side mono scheduling mo
 
 ## Example usage
 
-Build after the normal project build:
+### Existing local shortcut
+
+If you already built the full macOS plugin tree, you can still build the probe directly against the existing static archive:
 
 ```bash
 clang++ -std=c++17 \
@@ -70,13 +73,30 @@ clang++ -std=c++17 \
   -o build-opn-au-arm64/mono_click_probe
 ```
 
+### Portable cloud/Linux build
+
+Build the probe as a standalone CMake project:
+
+```bash
+cmake -S tools/mono_click_probe -B build-mono-click-probe
+cmake --build build-mono-click-probe -j
+```
+
+This path only builds `thirdparty/libOPNMIDI` plus the probe itself, so it works on Linux/cloud runners and does not require macOS or Audio Units.
+
+Run the smoke test:
+
+```bash
+ctest --test-dir build-mono-click-probe --output-on-failure
+```
+
 Run in mono mode:
 
 ```bash
-build-opn-au-arm64/mono_click_probe \
+build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
-  build-opn-au-arm64/mono_click_probe_mono.wav \
+  build-mono-click-probe/mono_click_probe_mono.wav \
   3.5 \
   mono
 ```
@@ -84,10 +104,10 @@ build-opn-au-arm64/mono_click_probe \
 Run in poly mode:
 
 ```bash
-build-opn-au-arm64/mono_click_probe \
+build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
-  build-opn-au-arm64/mono_click_probe_poly.wav \
+  build-mono-click-probe/mono_click_probe_poly.wav \
   3.5 \
   poly
 ```
@@ -95,10 +115,10 @@ build-opn-au-arm64/mono_click_probe \
 Run against Nuked instead of MAME:
 
 ```bash
-build-opn-au-arm64/mono_click_probe \
+build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
-  build-opn-au-arm64/mono_click_probe_nuked.wav \
+  build-mono-click-probe/mono_click_probe_nuked.wav \
   3.5 \
   mono \
   nuked

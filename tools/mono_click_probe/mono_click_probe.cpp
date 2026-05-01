@@ -265,7 +265,10 @@ int main(int argc, char **argv)
             stack.erase(std::remove_if(stack.begin(), stack.end(),
                         [pitch](const MonoNote &n) { return n.pitch == pitch; }),
                         stack.end());
-            stack.push_back({pitch, vel});
+            MonoNote note;
+            note.pitch = pitch;
+            note.velocity = vel;
+            stack.push_back(note);
 
             if (pending[ev.channel].active) {
                 schedule_pending(ev.channel, pitch, vel);
@@ -373,7 +376,11 @@ int main(int argc, char **argv)
             const double dr = std::fabs((double)right[i] - (double)right[i - 1]);
             peak = std::max(peak, std::max(dl, dr));
         }
-        spikes.push_back({ef / (double)sample_rate, baseline > 0.0 ? peak / baseline : 0.0, peak});
+        Spike spike;
+        spike.time = ef / (double)sample_rate;
+        spike.ratio = baseline > 0.0 ? peak / baseline : 0.0;
+        spike.peak_delta = peak;
+        spikes.push_back(spike);
     }
     std::sort(spikes.begin(), spikes.end(), [](const Spike &a, const Spike &b) { return a.ratio > b.ratio; });
 

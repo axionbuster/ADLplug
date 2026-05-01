@@ -168,14 +168,18 @@ void AdlplugAudioProcessor::prepareToPlay(double sample_rate, int block_size)
 
     ready_.store(1);
 
-    setStateInformation(
-        last_state_information_.getData(), (unsigned)last_state_information_.getSize());
+    const bool use_saved_state =
+        last_state_information_.getSize() != 0 &&
+        !parameters_changed_since_state_.load();
 
-    Parameter_Block &pb = *parameter_block_;
-    pb.set_chip_settings(get_player_chip_settings(*pl));
-    pb.set_global_parameters(get_player_global_parameters(*pl));
-    for (unsigned p = 0; p < 16; ++p)
-        set_instrument_parameters_notifying_host(p);
+    if (use_saved_state) {
+        setStateInformation(
+            last_state_information_.getData(), (unsigned)last_state_information_.getSize());
+    }
+    else {
+        process_parameter_changes();
+        parameters_changed_since_state_.store(0);
+    }
 
     Message_Header hdr{Fx_Message::NotifyReady, sizeof(Messages::Fx::NotifyReady)};
     Buffered_Message msg = Messages::write(*mq_to_ui, hdr);
@@ -995,11 +999,14 @@ void AdlplugAudioProcessor::setStateInformation(const void *data, int size)
     for (unsigned p = 0; p < 16; ++p)
         set_instrument_parameters_notifying_host(p);
     *pb.p_mastervol = common_set.getDoubleValue("master_volume", 1.0f);
+    parameters_changed_since_state_.store(0);
 }
 
 //==============================================================================
 void AdlplugAudioProcessor::parameterValueChangedEx(int tag)
 {
+    parameters_changed_since_state_.store(1);
+
     if (tag == 'chip')
         mark_parameter_as_changed(Cb_ChipSettings);
     else if (tag == 'glob')

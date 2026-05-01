@@ -166,7 +166,7 @@ if(ADLplug_AU)
     "${JUCE_PROJECT_DIR}/JuceLibraryCode/include_juce_audio_plugin_client_AU_1.mm"
     "${JUCE_PROJECT_DIR}/JuceLibraryCode/include_juce_audio_plugin_client_AU_2.mm")
   add_juce_module(juce_audio_plugin_client_AU ${AU_SOURCES})
-  target_link_libraries(juce_audio_plugin_client_AU PUBLIC juce_gui_basics juce_audio_basics juce_audio_processors "${QUARTZ_CORE_LIBRARY}" "${AUDIO_UNIT_LIBRARY}")
+  target_link_libraries(juce_audio_plugin_client_AU PUBLIC juce_gui_basics juce_audio_basics juce_audio_processors "${QUARTZ_CORE_LIBRARY}" "${AUDIO_UNIT_LIBRARY}" "${AUDIO_TOOLBOX_LIBRARY}")
 endif()
 
 if(ADLplug_Standalone)

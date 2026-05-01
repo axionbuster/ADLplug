@@ -151,6 +151,7 @@ private:
     std::unique_ptr<Bank_Manager> bank_manager_;
 
     std::atomic<int> ready_ {0};
+    std::atomic<int> parameters_changed_since_state_ {0};
 
     std::shared_ptr<Simple_Fifo> mq_from_ui_;
     std::shared_ptr<Simple_Fifo> mq_to_ui_;

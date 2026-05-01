@@ -130,7 +130,7 @@ void Parameter_Block::setup_parameters(AudioProcessorEx &p)
     }
 
     StringArray volmodel_choices = {"Generic"};
-    p_volmodel = add_parameter<Pt::Choice>(p, 'glob', "volmodel", "Volume model", volmodel_choices, wopn->volume_model, String());
+    p_volmodel = add_internal_parameter<Pt::Choice>(p, 'glob', "volmodel", "Volume model", volmodel_choices, 0, String());
     p_lfoenable = add_parameter<Pt::Bool>(p, 'glob', "lfoenable", "LFO enable", (wopn->lfo_freq & 8) != 0, String());
     StringArray lfofreq_choices = {"3.98 Hz", "5.56 Hz", "6.02 Hz", "6.37 Hz", "6.88 Hz", "9.63 Hz", "48.1 Hz", "72.2 Hz"};
     p_lfofreq = add_parameter<Pt::Choice>(p, 'glob', "lfofreq", "LFO frequency", lfofreq_choices, wopn->lfo_freq & 7, String());
@@ -163,7 +163,7 @@ void Parameter_Block::set_chip_settings(const Chip_Settings &cs)
 
 void Parameter_Block::set_global_parameters(const Instrument_Global_Parameters &gp)
 {
-    *p_volmodel = gp.volume_model;
+    *p_volmodel = std::min<unsigned>(gp.volume_model, p_volmodel->choices.size() - 1);
     *p_lfoenable = gp.lfo_enable;
     *p_lfofreq = gp.lfo_frequency;
 }

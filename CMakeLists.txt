@@ -375,9 +375,25 @@ if(ADLplug_AU)
   execute_process(COMMAND "${CMAKE_COMMAND}" -E copy
     "${JUCE_PROJECT_DIR}/juce/Builds/MacOSX/RecentFilesMenuTemplate.nib"
     "${CMAKE_CURRENT_BINARY_DIR}/au/${ADLplug_NAME}.component/Contents/Resources/RecentFilesMenuTemplate.nib")
-  execute_process(COMMAND "${CMAKE_COMMAND}" -E copy
-    "${PROJECT_SOURCE_DIR}/resources/au/${ADLplug_NAME}-${PROJECT_VERSION}.rsrc"
-    "${CMAKE_CURRENT_BINARY_DIR}/au/${ADLplug_NAME}.component/Contents/Resources/${ADLplug_NAME}.rsrc")
+  find_program(REZ_EXECUTABLE Rez)
+  execute_process(
+    COMMAND xcrun --sdk macosx --show-sdk-path
+    OUTPUT_VARIABLE ADLplug_MACOSX_SDK
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(REZ_EXECUTABLE AND ADLplug_MACOSX_SDK AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+    execute_process(COMMAND "${REZ_EXECUTABLE}" -useDF -d arm64_YES
+      -i "${JUCE_PROJECT_DIR}/JuceLibraryCode"
+      -i "${PROJECT_SOURCE_DIR}/thirdparty/JUCE/modules"
+      -i "${PROJECT_SOURCE_DIR}/thirdparty/JUCE/modules/juce_audio_plugin_client"
+      -i "${ADLplug_MACOSX_SDK}/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/Headers"
+      -isysroot "${ADLplug_MACOSX_SDK}"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/au/${ADLplug_NAME}.component/Contents/Resources/${ADLplug_NAME}.rsrc"
+      "${JUCE_PROJECT_DIR}/JuceLibraryCode/include_juce_audio_plugin_client_AU.r")
+  else()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E copy
+      "${PROJECT_SOURCE_DIR}/resources/au/${ADLplug_NAME}-1.0.0.rsrc"
+      "${CMAKE_CURRENT_BINARY_DIR}/au/${ADLplug_NAME}.component/Contents/Resources/${ADLplug_NAME}.rsrc")
+  endif()
   execute_process(COMMAND "${CMAKE_COMMAND}" -E create_symlink "/Library/Audio/Plug-Ins/Components" "${CMAKE_CURRENT_BINARY_DIR}/au/Audio Units")
 endif()
 

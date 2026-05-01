@@ -55,7 +55,8 @@ The probe:
 3. Replays the extracted event slice for 3.5 seconds.
 4. Can run in `mono` or `poly` mode.
 5. Can optionally select an emulator by substring (default: `mame`).
-6. Writes a WAV file and prints the largest discontinuity spikes.
+6. Writes a WAV file, a tab-separated spike report, and a PPM visualization beside the WAV path.
+7. Prints the largest discontinuity spikes plus the generated artifact paths.
 
 The `mono` mode in this probe mirrors the current plugin-side mono scheduling model closely enough to compare mono-vs-poly behavior on the same event sequence.
 
@@ -90,6 +91,12 @@ Run the smoke test:
 ctest --test-dir build-mono-click-probe --output-on-failure
 ```
 
+The smoke test leaves these artifact types next to the requested WAV output path:
+
+- `*.wav` — rendered audio
+- `*.spikes.tsv` — machine-readable spike list
+- `*.ppm` — waveform/discontinuity visualization with event and top-spike markers
+
 Run in mono mode:
 
 ```bash
@@ -100,6 +107,12 @@ build-mono-click-probe/mono_click_probe \
   3.5 \
   mono
 ```
+
+This produces:
+
+- `build-mono-click-probe/mono_click_probe_mono.wav`
+- `build-mono-click-probe/mono_click_probe_mono.spikes.tsv`
+- `build-mono-click-probe/mono_click_probe_mono.ppm`
 
 Run in poly mode:
 

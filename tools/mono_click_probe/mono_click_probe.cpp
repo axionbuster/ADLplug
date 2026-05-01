@@ -9,6 +9,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -152,6 +153,143 @@ void write_wav(const char *path, const std::vector<float> &left, const std::vect
         out.write(reinterpret_cast<const char *>(&ls), sizeof(ls));
         out.write(reinterpret_cast<const char *>(&rs), sizeof(rs));
     }
+}
+
+std::string artifact_base_path(const char *output_path)
+{
+    std::string base(output_path);
+    const std::string::size_type slash = base.find_last_of("/\\");
+    const std::string::size_type dot = base.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        base.erase(dot);
+    return base;
+}
+
+void write_spike_report(const std::string &path, const std::vector<Spike> &spikes)
+{
+    std::ofstream out(path.c_str());
+    if (!out)
+        throw std::runtime_error("failed to open spike report output");
+
+    out << "time_s\tpeak_delta\tratio\n";
+    for (size_t i = 0; i < spikes.size(); ++i)
+        out << spikes[i].time << '\t' << spikes[i].peak_delta << '\t' << spikes[i].ratio << '\n';
+}
+
+void write_visualization_ppm(const std::string &path,
+                             const std::vector<float> &left,
+                             const std::vector<float> &right,
+                             const std::vector<double> &deltas,
+                             const std::vector<unsigned> &event_frames,
+                             const std::vector<Spike> &spikes,
+                             double baseline,
+                             unsigned sample_rate)
+{
+    const int width = 1600;
+    const int height = 900;
+    const int wave_top = 40;
+    const int wave_bottom = 560;
+    const int delta_top = 620;
+    const int delta_bottom = 860;
+    const int wave_mid = (wave_top + wave_bottom) / 2;
+    const int wave_half = (wave_bottom - wave_top) / 2 - 8;
+    const int delta_height = delta_bottom - delta_top;
+    const double duration = left.empty() ? 0.0 : left.size() / (double)sample_rate;
+    const double max_delta = deltas.empty() ? 0.0 : *std::max_element(deltas.begin(), deltas.end());
+
+    std::vector<unsigned char> image((size_t)width * (size_t)height * 3u, 255);
+
+    const struct Color {
+        unsigned char r, g, b;
+    } background = {255, 255, 255},
+      axis = {180, 180, 180},
+      waveform = {25, 25, 25},
+      delta = {60, 110, 220},
+      baseline_color = {60, 160, 90},
+      event_color = {255, 220, 220},
+      spike_color = {220, 40, 40};
+
+    (void)background;
+
+    const auto set_pixel = [&](int x, int y, Color c) {
+        if (x < 0 || x >= width || y < 0 || y >= height)
+            return;
+        const size_t pos = ((size_t)y * (size_t)width + (size_t)x) * 3u;
+        image[pos + 0] = c.r;
+        image[pos + 1] = c.g;
+        image[pos + 2] = c.b;
+    };
+
+    const auto draw_vline = [&](int x, int y0, int y1, Color c) {
+        if (y0 > y1)
+            std::swap(y0, y1);
+        for (int y = y0; y <= y1; ++y)
+            set_pixel(x, y, c);
+    };
+
+    const auto draw_hline = [&](int x0, int x1, int y, Color c) {
+        if (x0 > x1)
+            std::swap(x0, x1);
+        for (int x = x0; x <= x1; ++x)
+            set_pixel(x, y, c);
+    };
+
+    draw_hline(0, width - 1, wave_top, axis);
+    draw_hline(0, width - 1, wave_mid, axis);
+    draw_hline(0, width - 1, wave_bottom, axis);
+    draw_hline(0, width - 1, delta_top, axis);
+    draw_hline(0, width - 1, delta_bottom, axis);
+
+    for (size_t i = 0; i < event_frames.size(); ++i) {
+        const int x = duration > 0.0 ? (int)std::lround((event_frames[i] / (double)sample_rate) / duration * (width - 1)) : 0;
+        draw_vline(x, wave_top, delta_bottom, event_color);
+    }
+
+    for (int x = 0; x < width; ++x) {
+        const unsigned start = (unsigned)(((uint64_t)x * (uint64_t)left.size()) / (uint64_t)width);
+        unsigned end = (unsigned)(((uint64_t)(x + 1) * (uint64_t)left.size()) / (uint64_t)width);
+        if (end <= start)
+            end = std::min<unsigned>((unsigned)left.size(), start + 1);
+        if (start >= left.size())
+            continue;
+
+        double min_sample = 1.0;
+        double max_sample = -1.0;
+        for (unsigned i = start; i < end; ++i) {
+            const double mono = 0.5 * ((double)left[i] + (double)right[i]);
+            min_sample = std::min(min_sample, mono);
+            max_sample = std::max(max_sample, mono);
+        }
+        const int y0 = std::max(wave_top, std::min(wave_bottom, wave_mid - (int)std::lround(max_sample * wave_half)));
+        const int y1 = std::max(wave_top, std::min(wave_bottom, wave_mid - (int)std::lround(min_sample * wave_half)));
+        draw_vline(x, y0, y1, waveform);
+
+        if (!deltas.empty() && max_delta > 0.0) {
+            const unsigned dstart = start > 0 ? start - 1 : 0;
+            const unsigned dend = std::min<unsigned>((unsigned)deltas.size(), end);
+            double column_peak = 0.0;
+            for (unsigned i = dstart; i < dend; ++i)
+                column_peak = std::max(column_peak, deltas[i]);
+            const int bar = (int)std::lround((column_peak / max_delta) * (delta_height - 4));
+            draw_vline(x, delta_bottom - bar, delta_bottom, delta);
+        }
+    }
+
+    if (max_delta > 0.0) {
+        const int baseline_y = delta_bottom - (int)std::lround((baseline / max_delta) * (delta_height - 4));
+        draw_hline(0, width - 1, std::max(delta_top, std::min(delta_bottom, baseline_y)), baseline_color);
+    }
+
+    for (size_t i = 0; i < std::min<size_t>(spikes.size(), 8); ++i) {
+        const int x = duration > 0.0 ? (int)std::lround(spikes[i].time / duration * (width - 1)) : 0;
+        draw_vline(x, wave_top, delta_bottom, spike_color);
+    }
+
+    std::ofstream out(path.c_str(), std::ios::binary);
+    if (!out)
+        throw std::runtime_error("failed to open visualization output");
+    out << "P6\n" << width << ' ' << height << "\n255\n";
+    out.write(reinterpret_cast<const char *>(image.data()), (std::streamsize)image.size());
 }
 
 } // namespace
@@ -384,8 +522,16 @@ int main(int argc, char **argv)
     }
     std::sort(spikes.begin(), spikes.end(), [](const Spike &a, const Spike &b) { return a.ratio > b.ratio; });
 
+    const std::string artifact_base = artifact_base_path(wav_path);
+    const std::string spikes_path = artifact_base + ".spikes.tsv";
+    const std::string visual_path = artifact_base + ".ppm";
+    write_spike_report(spikes_path, spikes);
+    write_visualization_ppm(visual_path, left, right, deltas, event_frames, spikes, baseline, sample_rate);
+
     std::cout << "rendered_frames\t" << total_frames << "\n";
     std::cout << "median_delta\t" << baseline << "\n";
+    std::cout << "artifact_spikes\t" << spikes_path << "\n";
+    std::cout << "artifact_visual\t" << visual_path << "\n";
     for (size_t i = 0; i < std::min<size_t>(spikes.size(), 8); ++i)
         std::cout << "spike\t" << spikes[i].time << "\t" << spikes[i].peak_delta << "\t" << spikes[i].ratio << "\n";
     return 0;

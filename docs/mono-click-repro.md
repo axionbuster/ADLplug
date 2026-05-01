@@ -8,33 +8,33 @@
   - patch: `M056 Trumpet` (program 56)
   - range: low notes
   - source material: the first few seconds of `temp-midi-bass.mid`
-- A stripped offline probe was used to replay only the first **3.5s** worth of channel events from that MIDI file and score sample-to-sample discontinuity spikes around note edges.
-- For that first 3.5s slice, the largest spikes were identical in **mono** and **poly** playback, so this repro slice is **not currently mono-exclusive**.
-- The same slice is also **emulator-sensitive**: MAME-family backends show the largest discontinuity spikes, while Nuked produces much smaller absolute peaks on the same material.
+- A stripped offline probe now replays the first **10s** worth of channel events from that MIDI file (107 exported events through `9.994449442s`) and scores sample-to-sample discontinuity spikes around note edges.
+- For that 10-second slice, the largest spikes are still identical in **mono** and **poly** playback on MAME YM2612, so this repro slice is **not currently mono-exclusive**.
+- The same slice is also **emulator-sensitive**: all tested backends still click, but the worst absolute peak size changes substantially by emulator.
 
 ## Measured spike summary
 
 The probe computes a median sample-to-sample delta baseline, then measures the largest local peak near each event boundary.
 
-Observed worst spikes on the current build:
+Observed worst spikes on the current build for the checked-in 10-second slice:
 
 | Time (s) | Peak delta | Ratio vs median delta | Nearest event |
 | --- | ---: | ---: | --- |
-| 0.993061 | 0.00241096 | 19.75x | `note_off ch=1 note=50 vel=64` |
-| 1.300000 | 0.00219733 | 18.00x | `note_off ch=1 note=50 vel=64` |
-| 0.306939 | 0.00189215 | 15.50x | `note_off ch=1 note=50 vel=64` |
-| 1.000000 | 0.00183111 | 15.00x | `note_on ch=1 note=50 vel=89` |
-| 1.640270 | 0.00137333 | 11.25x | `note_off ch=1 note=50 vel=64` |
-| 0.856939 | 0.000946074 | 7.75x | `note_on ch=1 note=50 vel=89` |
+| 5.030570 | 0.00680563 | 55.75x | `pitchwheel ch=1 pitch=-253` |
+| 5.041680 | 0.00534074 | 43.75x | `pitchwheel ch=1 pitch=-192` |
+| 5.062490 | 0.00445570 | 36.50x | `pitchwheel ch=1 pitch=-117` |
+| 5.020840 | 0.00396741 | 32.50x | `pitchwheel ch=1 pitch=-347` |
+| 5.113900 | 0.00393689 | 32.25x | `pitchwheel ch=1 pitch=-31` |
+| 5.125010 | 0.00375378 | 30.75x | `pitchwheel ch=1 pitch=-22` |
 
 Observed backend difference on the same mono render:
 
 | Emulator | Worst peak delta | Notes |
 | --- | ---: | --- |
-| `MAME YM2612` | 0.00241096 | current historical default, worst measured spikes |
-| `GENS 2.10 OPN2` | 0.00234993 | similarly clicky on this excerpt |
-| `Neko Project II Kai OPNA` | 0.00225837 | still clicky, slightly lower |
-| `Nuked OPN2` | 0.00122074 | materially lower absolute peak on this excerpt |
+| `MAME YM2612` | 0.00680563 | worst measured absolute peak on this 10-second excerpt |
+| `Nuked OPN2` | 0.00653096 | still very clicky here, with a lower absolute peak but a noisier baseline |
+| `Neko Project II Kai OPNA` | 0.00460829 | lower than MAME on this excerpt, still clearly discontinuous |
+| `GENS 2.10 OPN2` | 0.00430311 | lower than MAME here, still clearly discontinuous |
 
 ## What is checked in
 
@@ -52,7 +52,7 @@ The probe:
 
 1. Loads the Papiezak/Sneakernets DMXOPN2 bank.
 2. Selects program 56 on channel 1.
-3. Replays the extracted event slice for 3.5 seconds.
+3. Replays the extracted event slice for 10 seconds.
 4. Can run in `mono` or `poly` mode.
 5. Can optionally select an emulator by substring (default: `mame`).
 6. Writes a WAV file, a tab-separated spike report, and a PPM visualization beside the WAV path.
@@ -104,7 +104,7 @@ build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
   build-mono-click-probe/mono_click_probe_mono.wav \
-  3.5 \
+  10 \
   mono
 ```
 
@@ -121,7 +121,7 @@ build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
   build-mono-click-probe/mono_click_probe_poly.wav \
-  3.5 \
+  10 \
   poly
 ```
 
@@ -132,7 +132,7 @@ build-mono-click-probe/mono_click_probe \
   thirdparty/libOPNMIDI/fm_banks/gs-by-papiezak-and-sneakernets.wopn \
   tools/mono_click_probe/temp_midi_bass_excerpt.tsv \
   build-mono-click-probe/mono_click_probe_nuked.wav \
-  3.5 \
+  10 \
   mono \
   nuked
 ```

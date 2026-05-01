@@ -186,6 +186,8 @@ private:
     struct MonoNote { uint8_t pitch; uint8_t velocity; };
     std::vector<MonoNote> mono_note_stack_[16];
     int mono_sounding_[16];  // currently sounding pitch, or -1
+    unsigned mono_handoff_ramp_remaining_ = 0;
+    unsigned mono_handoff_ramp_total_ = 0;
 
     unsigned active_part_ = 0;
 

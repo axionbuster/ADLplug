@@ -349,6 +349,16 @@ void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Inp
         }
 
         pl->generate(&left[iframe], &right[iframe], segment_nframes, 1);
+        if (mono_handoff_ramp_remaining_ > 0) {
+            unsigned ramp_nframes = std::min(segment_nframes, mono_handoff_ramp_remaining_);
+            unsigned ramp_done = mono_handoff_ramp_total_ - mono_handoff_ramp_remaining_;
+            for (unsigned i = 0; i < ramp_nframes; ++i) {
+                float gain = (float)(ramp_done + i) / (float)mono_handoff_ramp_total_;
+                left[iframe + i] *= gain;
+                right[iframe + i] *= gain;
+            }
+            mono_handoff_ramp_remaining_ -= ramp_nframes;
+        }
         iframe += segment_nframes;
     }
     int64_t time_after_generate = Time::getHighResolutionTicks();
@@ -547,6 +557,11 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
     bool is_note_on  = (type == 0x90) && (len >= 3) && (data[2] > 0);
     bool is_note_off = (type == 0x80) && (len >= 3);
     bool is_vel0_off = (type == 0x90) && (len >= 3) && (data[2] == 0);
+    auto arm_mono_handoff_ramp = [this] {
+        unsigned samples = (unsigned)(getSampleRate() / 1000.0 + 0.5);
+        mono_handoff_ramp_total_ = std::max(16u, std::min(96u, samples));
+        mono_handoff_ramp_remaining_ = mono_handoff_ramp_total_;
+    };
 
     if (mono && (is_note_on || is_note_off || is_vel0_off)) {
         uint8_t pitch = data[1];
@@ -568,6 +583,7 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
             if (sound >= 0 && sound != (int)pitch) {
 #if defined(ADLPLUG_OPN2)
                 pl->mono_handoff(channel, (uint8_t)sound, pitch, vel);
+                arm_mono_handoff_ramp();
 #else
                 send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
@@ -591,6 +607,7 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                     if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
 #if defined(ADLPLUG_OPN2)
                     pl->mono_handoff(channel, pitch, prev.pitch, prev.velocity);
+                    arm_mono_handoff_ramp();
 #else
                     send_midi3(pl, 0x80 | channel, pitch, 0);
                     send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);

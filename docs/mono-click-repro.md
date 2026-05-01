@@ -95,7 +95,7 @@ The smoke test leaves these artifact types next to the requested WAV output path
 
 - `*.wav` — rendered audio
 - `*.spikes.tsv` — machine-readable spike list
-- `*.ppm` — waveform/discontinuity visualization with event and top-spike markers
+- `*.png` — waveform/discontinuity visualization with event and top-spike markers
 
 Run in mono mode:
 
@@ -112,7 +112,7 @@ This produces:
 
 - `build-mono-click-probe/mono_click_probe_mono.wav`
 - `build-mono-click-probe/mono_click_probe_mono.spikes.tsv`
-- `build-mono-click-probe/mono_click_probe_mono.ppm`
+- `build-mono-click-probe/mono_click_probe_mono.png`
 
 Run in poly mode:
 

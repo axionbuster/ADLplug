@@ -176,7 +176,91 @@ void write_spike_report(const std::string &path, const std::vector<Spike> &spike
         out << spikes[i].time << '\t' << spikes[i].peak_delta << '\t' << spikes[i].ratio << '\n';
 }
 
-void write_visualization_ppm(const std::string &path,
+// ---------------------------------------------------------------------------
+// Minimal self-contained PNG writer (deflate stored-blocks, no compression,
+// no external library required).
+// ---------------------------------------------------------------------------
+
+static uint32_t png_crc32(const uint8_t *buf, size_t len)
+{
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (unsigned i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; ++j)
+                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        ready = true;
+    }
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i)
+        crc = table[(crc ^ buf[i]) & 0xFFu] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static void png_u32be(std::vector<uint8_t> &out, uint32_t v)
+{
+    out.push_back((uint8_t)(v >> 24));
+    out.push_back((uint8_t)(v >> 16));
+    out.push_back((uint8_t)(v >> 8));
+    out.push_back((uint8_t)v);
+}
+
+static void png_chunk(std::vector<uint8_t> &out, const char *type,
+                      const uint8_t *data, uint32_t len)
+{
+    png_u32be(out, len);
+    const size_t type_start = out.size();
+    out.insert(out.end(), (const uint8_t *)type, (const uint8_t *)type + 4);
+    if (len > 0)
+        out.insert(out.end(), data, data + len);
+    png_u32be(out, png_crc32(out.data() + type_start, 4u + len));
+}
+
+// Wrap raw bytes in a zlib stream using deflate stored (non-compressed) blocks.
+static std::vector<uint8_t> png_zlib_stored(const uint8_t *data, size_t len)
+{
+    std::vector<uint8_t> z;
+    // zlib header: CMF=0x78 (deflate, 32K window), FLG=0x01 so that
+    // CMF*256+FLG = 30721 is divisible by 31 (required by zlib spec).
+    z.push_back(0x78);
+    z.push_back(0x01);
+
+    uint32_t s1 = 1, s2 = 0;
+    const uint32_t ADLER_MOD = 65521u;
+    size_t offset = 0;
+    do {
+        const size_t block_size = std::min<size_t>(65535u, len - offset);
+        const bool is_last = (offset + block_size >= len);
+        z.push_back(is_last ? 0x01u : 0x00u);
+        const uint16_t blen  = (uint16_t)block_size;
+        const uint16_t nblen = (uint16_t)(~blen);
+        z.push_back((uint8_t)(blen  & 0xFFu));
+        z.push_back((uint8_t)(blen  >> 8));
+        z.push_back((uint8_t)(nblen & 0xFFu));
+        z.push_back((uint8_t)(nblen >> 8));
+        for (size_t i = 0; i < block_size; ++i) {
+            const uint8_t b = data[offset + i];
+            z.push_back(b);
+            s1 = (s1 + b)  % ADLER_MOD;
+            s2 = (s2 + s1) % ADLER_MOD;
+        }
+        offset += block_size;
+        if (is_last) break;
+    } while (offset < len);
+
+    // Adler-32 checksum, big-endian
+    const uint32_t adler = (s2 << 16) | s1;
+    z.push_back((uint8_t)(adler >> 24));
+    z.push_back((uint8_t)(adler >> 16));
+    z.push_back((uint8_t)(adler >> 8));
+    z.push_back((uint8_t)adler);
+    return z;
+}
+
+void write_visualization_png(const std::string &path,
                              const std::vector<float> &left,
                              const std::vector<float> &right,
                              const std::vector<double> &deltas,
@@ -285,11 +369,50 @@ void write_visualization_ppm(const std::string &path,
         draw_vline(x, wave_top, delta_bottom, spike_color);
     }
 
+    // Build PNG scanline data: one filter byte (0x00 = None) per row, then RGB.
+    std::vector<uint8_t> raw;
+    raw.reserve((size_t)height * (size_t)(1 + width * 3));
+    for (int y = 0; y < height; ++y) {
+        raw.push_back(0x00u);
+        for (int x = 0; x < width; ++x) {
+            const size_t pos = ((size_t)y * (size_t)width + (size_t)x) * 3u;
+            raw.push_back(image[pos + 0]);
+            raw.push_back(image[pos + 1]);
+            raw.push_back(image[pos + 2]);
+        }
+    }
+
+    std::vector<uint8_t> png;
+    // PNG signature
+    const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    png.insert(png.end(), sig, sig + 8);
+
+    // IHDR
+    uint8_t ihdr[13];
+    const auto set_u32be = [](uint8_t *p, uint32_t v) {
+        p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+        p[2] = (uint8_t)(v >>  8); p[3] = (uint8_t)v;
+    };
+    set_u32be(ihdr + 0, (uint32_t)width);
+    set_u32be(ihdr + 4, (uint32_t)height);
+    ihdr[8]  = 8; // bit depth
+    ihdr[9]  = 2; // color type: RGB truecolor
+    ihdr[10] = 0; // compression method
+    ihdr[11] = 0; // filter method
+    ihdr[12] = 0; // interlace method
+    png_chunk(png, "IHDR", ihdr, 13);
+
+    // IDAT
+    const std::vector<uint8_t> idat_data = png_zlib_stored(raw.data(), raw.size());
+    png_chunk(png, "IDAT", idat_data.data(), (uint32_t)idat_data.size());
+
+    // IEND
+    png_chunk(png, "IEND", nullptr, 0);
+
     std::ofstream out(path.c_str(), std::ios::binary);
     if (!out)
         throw std::runtime_error("failed to open visualization output");
-    out << "P6\n" << width << ' ' << height << "\n255\n";
-    out.write(reinterpret_cast<const char *>(image.data()), (std::streamsize)image.size());
+    out.write(reinterpret_cast<const char *>(png.data()), (std::streamsize)png.size());
 }
 
 } // namespace
@@ -524,9 +647,9 @@ int main(int argc, char **argv)
 
     const std::string artifact_base = artifact_base_path(wav_path);
     const std::string spikes_path = artifact_base + ".spikes.tsv";
-    const std::string visual_path = artifact_base + ".ppm";
+    const std::string visual_path = artifact_base + ".png";
     write_spike_report(spikes_path, spikes);
-    write_visualization_ppm(visual_path, left, right, deltas, event_frames, spikes, baseline, sample_rate);
+    write_visualization_png(visual_path, left, right, deltas, event_frames, spikes, baseline, sample_rate);
 
     std::cout << "rendered_frames\t" << total_frames << "\n";
     std::cout << "median_delta\t" << baseline << "\n";

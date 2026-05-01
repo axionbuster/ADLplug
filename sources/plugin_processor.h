@@ -186,8 +186,19 @@ private:
     struct MonoNote { uint8_t pitch; uint8_t velocity; };
     std::vector<MonoNote> mono_note_stack_[16];
     int mono_sounding_[16];  // currently sounding pitch, or -1
-    unsigned mono_handoff_ramp_remaining_ = 0;
-    unsigned mono_handoff_ramp_total_ = 0;
+
+    // Deferred handoff: set by handle_midi(), consumed by process()
+    // Allows a pre-generate fade-out before the hard mute, eliminating clicks.
+    struct PendingHandoff {
+        bool     active      = false;
+        uint8_t  channel     = 0;
+        uint8_t  old_pitch   = 0;
+        uint8_t  new_pitch   = 0;
+        uint8_t  new_velocity = 0;
+        bool     port        = false;
+        uint8_t  port_time   = 0;
+    };
+    PendingHandoff pending_handoff_;
 
     unsigned active_part_ = 0;
 

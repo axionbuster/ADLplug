@@ -307,6 +307,14 @@ struct AdlplugAudioProcessor::Message_Handler_Context
     bool under_lock = false;
 };
 
+// Send a 3-byte MIDI message directly to the player.
+// Defined here (before process() and handle_midi()) so both can call it.
+static void send_midi3(Player *pl, uint8_t status, uint8_t d1, uint8_t d2)
+{
+    uint8_t msg[3] = {status, d1, d2};
+    pl->play_midi(msg, 3);
+}
+
 void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Input_Source &midi)
 {
 #ifdef ADLplug_RT_CHECKER
@@ -348,16 +356,43 @@ void AdlplugAudioProcessor::process(float *outputs[], unsigned nframes, Midi_Inp
             midi.get_next_event();
         }
 
-        pl->generate(&left[iframe], &right[iframe], segment_nframes, 1);
-        if (mono_handoff_ramp_remaining_ > 0) {
-            unsigned ramp_nframes = std::min(segment_nframes, mono_handoff_ramp_remaining_);
-            unsigned ramp_done = mono_handoff_ramp_total_ - mono_handoff_ramp_remaining_;
-            for (unsigned i = 0; i < ramp_nframes; ++i) {
-                float gain = (float)(ramp_done + i) / (float)mono_handoff_ramp_total_;
-                left[iframe + i] *= gain;
+        if (pending_handoff_.active) {
+            // Pre-generate crossfade: fade the old note out, do the handoff at
+            // near-silence, then fade the new note in. This prevents the click
+            // that would occur if mono_handoff's hard mute happened mid-buffer.
+            auto &h = pending_handoff_;
+            constexpr unsigned fade_samples = 32; // ~0.7 ms at 44.1 kHz
+
+            // --- 1. Generate fade-out segment (old note still sounding) ---
+            unsigned fade_out = std::min(fade_samples, segment_nframes);
+            pl->generate(&left[iframe], &right[iframe], fade_out, 1);
+            for (unsigned i = 0; i < fade_out; ++i) {
+                float gain = 1.0f - (float)(i + 1) / (float)fade_out;
+                left[iframe + i]  *= gain;
                 right[iframe + i] *= gain;
             }
-            mono_handoff_ramp_remaining_ -= ramp_nframes;
+
+            // --- 2. Perform the handoff now that audio is at ~zero ---
+#if defined(ADLPLUG_OPN2)
+            send_midi3(pl, 0xb0 | h.channel, 65, h.port ? 127 : 0);
+            if (h.port) send_midi3(pl, 0xb0 | h.channel, 5, h.port_time);
+            pl->mono_handoff(h.channel, h.old_pitch, h.new_pitch, h.new_velocity);
+#endif
+            pending_handoff_.active = false;
+
+            // --- 3. Generate remaining samples (new note) with fade-in ---
+            unsigned remaining = segment_nframes - fade_out;
+            if (remaining > 0) {
+                pl->generate(&left[iframe + fade_out], &right[iframe + fade_out], remaining, 1);
+                unsigned fade_in = std::min(fade_samples, remaining);
+                for (unsigned i = 0; i < fade_in; ++i) {
+                    float gain = (float)(i + 1) / (float)fade_in;
+                    left[iframe + fade_out + i]  *= gain;
+                    right[iframe + fade_out + i] *= gain;
+                }
+            }
+        } else {
+            pl->generate(&left[iframe], &right[iframe], segment_nframes, 1);
         }
         iframe += segment_nframes;
     }
@@ -531,13 +566,6 @@ void AdlplugAudioProcessor::process_notifications()
     }
 }
 
-// Send a 3-byte MIDI message directly to the player (used by mono logic).
-static void send_midi3(Player *pl, uint8_t status, uint8_t d1, uint8_t d2)
-{
-    uint8_t msg[3] = {status, d1, d2};
-    pl->play_midi(msg, 3);
-}
-
 bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
 {
     Player *pl = player_.get();
@@ -557,11 +585,6 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
     bool is_note_on  = (type == 0x90) && (len >= 3) && (data[2] > 0);
     bool is_note_off = (type == 0x80) && (len >= 3);
     bool is_vel0_off = (type == 0x90) && (len >= 3) && (data[2] == 0);
-    auto arm_mono_handoff_ramp = [this] {
-        unsigned samples = (unsigned)(getSampleRate() / 1000.0 + 0.5);
-        mono_handoff_ramp_total_ = std::max(16u, std::min(96u, samples));
-        mono_handoff_ramp_remaining_ = mono_handoff_ramp_total_;
-    };
 
     if (mono && (is_note_on || is_note_off || is_vel0_off)) {
         uint8_t pitch = data[1];
@@ -576,19 +599,27 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                 stack.end());
             stack.push_back({pitch, vel});
 
-            // Arm portamento CCs before the note transition
-            send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
-            if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
-
             if (sound >= 0 && sound != (int)pitch) {
 #if defined(ADLPLUG_OPN2)
-                pl->mono_handoff(channel, (uint8_t)sound, pitch, vel);
-                arm_mono_handoff_ramp();
+                // Defer the handoff — process() will fade out first, then call
+                // mono_handoff, eliminating the click from the hard mute.
+                pending_handoff_.active       = true;
+                pending_handoff_.channel      = (uint8_t)channel;
+                pending_handoff_.old_pitch    = (uint8_t)sound;
+                pending_handoff_.new_pitch    = pitch;
+                pending_handoff_.new_velocity = vel;
+                pending_handoff_.port         = port;
+                pending_handoff_.port_time    = (uint8_t)portT;
 #else
+                send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
+                if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                 send_midi3(pl, 0x80 | channel, (uint8_t)sound, 0);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
 #endif
             } else if (sound < 0) {
+                // First note — no transition needed
+                send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
+                if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
                 send_midi3(pl, 0x90 | channel, pitch, vel);
             }
             // If sound == pitch (same note re-pressed), do nothing — already sounding
@@ -603,12 +634,17 @@ bool AdlplugAudioProcessor::handle_midi(const uint8_t *data, unsigned len)
                 if (!stack.empty()) {
                     // Fall back to the most recently pressed still-held note
                     MonoNote prev = stack.back();
+#if defined(ADLPLUG_OPN2)
+                    pending_handoff_.active       = true;
+                    pending_handoff_.channel      = (uint8_t)channel;
+                    pending_handoff_.old_pitch    = pitch;
+                    pending_handoff_.new_pitch    = prev.pitch;
+                    pending_handoff_.new_velocity = prev.velocity;
+                    pending_handoff_.port         = port;
+                    pending_handoff_.port_time    = (uint8_t)portT;
+#else
                     send_midi3(pl, 0xb0 | channel, 65, port ? 127 : 0);
                     if (port) send_midi3(pl, 0xb0 | channel, 5, (uint8_t)portT);
-#if defined(ADLPLUG_OPN2)
-                    pl->mono_handoff(channel, pitch, prev.pitch, prev.velocity);
-                    arm_mono_handoff_ramp();
-#else
                     send_midi3(pl, 0x80 | channel, pitch, 0);
                     send_midi3(pl, 0x90 | channel, prev.pitch, prev.velocity);
 #endif

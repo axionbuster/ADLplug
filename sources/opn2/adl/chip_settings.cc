@@ -50,8 +50,8 @@ Emulator_Defaults &get_emulator_defaults()
         if (mame_index == ~0u && name.size() >= 4 && !memcmp(name.data(), "mame", 4))
             mame_index = i;
     }
-    defaults->default_index = (nuked_index != ~0u) ? nuked_index :
-        (mame_index != ~0u) ? mame_index : 0;
+    defaults->default_index = (mame_index != ~0u) ? mame_index :
+        (nuked_index != ~0u) ? nuked_index : 0;
 
     //
     defaults->images.reset(new Image[count]);

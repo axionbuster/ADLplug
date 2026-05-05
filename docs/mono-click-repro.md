@@ -1,5 +1,18 @@
 # Mono click repro and offline probe
 
+## Prerequisites and environment caveats
+
+- `thirdparty/libOPNMIDI` must be available locally (submodule initialized/populated).
+- If missing, CMake configure fails with: `thirdparty/libOPNMIDI does not contain a CMakeLists.txt file`.
+- In restricted environments where cloning submodules is blocked, rely on checked-in diagnosis data and perform code-path inspection until submodule access is restored.
+
+## Primary target scenario (for remediation decisions)
+
+- Host: Logic Pro
+- Plugin format: AU (`OPNplug.component`)
+- Synth family in scope: OPN
+- Priority sound-design case: low-register bass lines in Mono mode where note transitions audibly click
+
 ## Current findings
 
 - The AU installed by `./postpull` was verified to match the just-built binary, so the observed clicks are coming from the current code, not a stale install.
